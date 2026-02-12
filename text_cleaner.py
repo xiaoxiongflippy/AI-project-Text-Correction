@@ -56,6 +56,82 @@ PUNCT_MAP = {
 
 
 LIST_MARKER_PATTERN = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
+CODE_STRONG_PATTERNS = (
+    re.compile(r"^(?:from\s+[A-Za-z_][\w.]*\s+import\b|import\s+[A-Za-z_][\w.]*)"),
+    re.compile(r"^(?:class|def)\s+[A-Za-z_]\w*"),
+    re.compile(r"^(?:if|elif|else|for|while|try|except|finally|with)\b.*:\s*$"),
+    re.compile(r"^(?:return|yield|break|continue|pass)\b"),
+    re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*=\s*.+"),
+    re.compile(r"^[A-Za-z_][\w.]*\([^)]*\)\s*$"),
+    re.compile(r"^@[A-Za-z_][\w.]*"),
+)
+CODE_SYMBOL_PATTERN = re.compile(r"[{}\[\]=;]")
+CN_PUNCT_HINT_PATTERN = re.compile(r"[，。！？；：、“”‘’（）【】《》]")
+FENCED_CODE_PATTERN = re.compile(r"^\s*```")
+
+
+def is_code_line_candidate(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if any(pattern.match(stripped) for pattern in CODE_STRONG_PATTERNS):
+        return True
+    if CODE_SYMBOL_PATTERN.search(stripped) and not CN_PUNCT_HINT_PATTERN.search(stripped):
+        return True
+    return False
+
+
+def detect_code_line_indexes(lines: list[str]) -> set[int]:
+    code_indexes: set[int] = set()
+    weak_indexes: set[int] = set()
+    in_fenced_code = False
+
+    for index, raw in enumerate(lines):
+        stripped = raw.strip()
+
+        if FENCED_CODE_PATTERN.match(stripped):
+            in_fenced_code = not in_fenced_code
+            continue
+
+        if in_fenced_code:
+            code_indexes.add(index)
+            continue
+
+        if not stripped:
+            continue
+
+        if is_code_line_candidate(raw):
+            code_indexes.add(index)
+            continue
+
+        if raw.startswith(("    ", "\t")):
+            weak_indexes.add(index)
+            continue
+
+        if stripped.startswith("#"):
+            weak_indexes.add(index)
+
+    changed = True
+    while changed:
+        changed = False
+        for index in list(weak_indexes):
+            near_code = (index - 1 in code_indexes) or (index + 1 in code_indexes)
+            skip_blank_before = (
+                index - 2 in code_indexes
+                and index - 1 >= 0
+                and not lines[index - 1].strip()
+            )
+            skip_blank_after = (
+                index + 2 in code_indexes
+                and index + 1 < len(lines)
+                and not lines[index + 1].strip()
+            )
+            if near_code or skip_blank_before or skip_blank_after:
+                code_indexes.add(index)
+                weak_indexes.remove(index)
+                changed = True
+
+    return code_indexes
 
 
 def clean_text(raw_text: str, options: CleanOptions) -> str:
@@ -96,6 +172,7 @@ def clean_text(raw_text: str, options: CleanOptions) -> str:
 def strip_markdown(text: str, keep_tables: bool = False) -> str:
     lines = text.split("\n")
     table_lines: set[int] = set()
+    code_lines = detect_code_line_indexes(lines)
     for i, line in enumerate(lines):
         if is_table_row_line(line) or is_table_separator_line(line):
             table_lines.add(i)
@@ -103,7 +180,7 @@ def strip_markdown(text: str, keep_tables: bool = False) -> str:
     non_table_parts: list[str] = []
     result_lines: list[str] = []
     for i, line in enumerate(lines):
-        if i in table_lines:
+        if i in table_lines or i in code_lines:
             if non_table_parts:
                 result_lines.append(_strip_markdown_inline("\n".join(non_table_parts)))
                 non_table_parts.clear()
@@ -367,25 +444,47 @@ def format_table_bullet(header: list[str], row: list[str]) -> str:
 
 
 def normalize_punctuation(text: str) -> str:
-    text = unicodedata.normalize("NFKC", text)
-    for source, target in PUNCT_MAP.items():
-        text = text.replace(source, target)
-    return text
+    lines = text.split("\n")
+    code_lines = detect_code_line_indexes(lines)
+    normalized_lines = []
+    for index, line in enumerate(lines):
+        if index in code_lines:
+            normalized_lines.append(line)
+            continue
+        normalized = unicodedata.normalize("NFKC", line)
+        for source, target in PUNCT_MAP.items():
+            normalized = normalized.replace(source, target)
+        normalized_lines.append(normalized)
+    return "\n".join(normalized_lines)
 
 
 def normalize_whitespace(text: str) -> str:
-    text = text.replace("\u3000", " ").replace("\u00a0", " ")
-    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
-    text = "\n".join(lines)
+    lines = text.split("\n")
+    code_lines = detect_code_line_indexes(lines)
+    normalized_lines = []
+    for index, raw in enumerate(lines):
+        line = raw.replace("\u3000", " ").replace("\u00a0", " ")
+        if index in code_lines:
+            normalized_lines.append(line.rstrip())
+            continue
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        line = re.sub(r" +([,.;:!?])", r"\1", line)
+        normalized_lines.append(line)
+    text = "\n".join(normalized_lines)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r" +([,.;:!?])", r"\1", text)
     return text
 
 
 def normalize_list_markers(text: str) -> str:
+    lines = text.split("\n")
+    code_lines = detect_code_line_indexes(lines)
     normalized = []
 
-    for raw in text.split("\n"):
+    for index, raw in enumerate(lines):
+        if index in code_lines:
+            normalized.append(raw.rstrip())
+            continue
+
         line = raw.strip()
         if not line:
             normalized.append("")
@@ -411,9 +510,15 @@ def normalize_list_markers(text: str) -> str:
 
 
 def remove_repeated_noise(text: str) -> str:
+    lines = text.split("\n")
+    code_lines = detect_code_line_indexes(lines)
     cleaned_lines = []
 
-    for raw in text.split("\n"):
+    for index, raw in enumerate(lines):
+        if index in code_lines:
+            cleaned_lines.append(raw.rstrip())
+            continue
+
         line = raw.strip()
         if not line:
             cleaned_lines.append("")
@@ -434,19 +539,35 @@ def remove_repeated_noise(text: str) -> str:
 
 
 def normalize_cjk_latin_spacing(text: str) -> str:
-    text = re.sub(r"([\u4e00-\u9fff])([A-Za-z0-9])", r"\1 \2", text)
-    text = re.sub(r"([A-Za-z0-9])([\u4e00-\u9fff])", r"\1 \2", text)
-    text = re.sub(r"([A-Za-z])(\d)", r"\1 \2", text)
-    text = re.sub(r"(\d)([A-Za-z])", r"\1 \2", text)
-    return text
+    lines = text.split("\n")
+    code_lines = detect_code_line_indexes(lines)
+    normalized_lines = []
+    for index, line in enumerate(lines):
+        if index in code_lines:
+            normalized_lines.append(line)
+            continue
+        normalized = re.sub(r"([\u4e00-\u9fff])([A-Za-z0-9])", r"\1 \2", line)
+        normalized = re.sub(r"([A-Za-z0-9])([\u4e00-\u9fff])", r"\1 \2", normalized)
+        normalized = re.sub(r"([A-Za-z])(\d)", r"\1 \2", normalized)
+        normalized = re.sub(r"(\d)([A-Za-z])", r"\1 \2", normalized)
+        normalized_lines.append(normalized)
+    return "\n".join(normalized_lines)
 
 
 def merge_lines(text: str) -> str:
     lines = text.split("\n")
+    code_lines = detect_code_line_indexes(lines)
     merged = []
     buffer = ""
 
-    for current in lines:
+    for index, current in enumerate(lines):
+        if index in code_lines:
+            if buffer:
+                merged.append(buffer.strip())
+                buffer = ""
+            merged.append(current.rstrip())
+            continue
+
         line = current.strip()
         if not line:
             if buffer:
@@ -528,10 +649,16 @@ def is_cjk(char: str) -> bool:
 
 def indent_paragraphs(text: str, treat_line_breaks_as_paragraphs: bool = False) -> str:
     lines = text.split("\n")
+    code_lines = detect_code_line_indexes(lines)
     formatted_lines = []
     paragraph_start = True
 
-    for raw in lines:
+    for index, raw in enumerate(lines):
+        if index in code_lines:
+            formatted_lines.append(raw.rstrip())
+            paragraph_start = True
+            continue
+
         line = raw.strip()
         if not line:
             formatted_lines.append("")
@@ -558,6 +685,8 @@ def should_indent(line: str) -> bool:
     if is_heading_like(line):
         return False
     if is_table_row_line(line):
+        return False
+    if is_code_line_candidate(line) or line.startswith(("    ", "\t")):
         return False
     return not bool(re.match(r"^(?:\d+[.)、]\s+|•\s+|-\s+|[（(]\d+[)）])", line))
 
