@@ -98,7 +98,7 @@ pip install -r requirements-py311.txt
 - `requirements-py311.txt`：Python 3.11 稳定依赖锁定
 - `app_gui.py`：产品化桌面界面（工作台）
 - `app_config.py`：本地配置持久化
-- `text_cleaner.py`：文本清洗核心逻辑
+- `text_cleanup.py`：文本清洗核心逻辑
 - `export_utils.py`：Word/PDF 导出器（保留段落与列表格式）
 
 ## 产品定位

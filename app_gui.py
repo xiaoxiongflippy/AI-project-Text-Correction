@@ -9,7 +9,7 @@ from tkinter import filedialog, messagebox
 
 from app_config import AppConfig, load_config, save_config
 from export_utils import export_to_pdf, export_to_word
-from text_cleaner import CleanOptions, clean_text, punctuation_consistency_warnings
+from text_cleanup import CleanOptions, clean_text, punctuation_consistency_warnings
 
 
 def _enable_dpi_awareness() -> None:

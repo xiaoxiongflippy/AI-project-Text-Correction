@@ -3,7 +3,7 @@ from os import execv
 from pathlib import Path
 from subprocess import run
 
-from text_cleaner import cli
+from text_cleanup import cli
 
 
 def _is_supported_py() -> bool:
