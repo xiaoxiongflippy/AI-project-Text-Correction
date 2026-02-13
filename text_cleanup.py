@@ -55,7 +55,8 @@ PUNCT_MAP = {
 }
 
 
-LIST_MARKER_PATTERN = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
+BULLET_LIST_PATTERN = re.compile(r"^(?:[-*+•·●▪◦‣⁃])\s*(.+)$")
+ORDERED_LIST_PATTERN = re.compile(r"^[（(]?(\d{1,3})[)）.、](?:\s+(.+)|(?!\d)(.+))$")
 CODE_STRONG_PATTERNS = (
     re.compile(r"^(?:from\s+[A-Za-z_][\w.]*\s+import\b|import\s+[A-Za-z_][\w.]*)"),
     re.compile(r"^(?:class|def)\s+[A-Za-z_]\w*"),
@@ -74,11 +75,23 @@ def is_code_line_candidate(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
+    if is_list_item_line(stripped):
+        return False
     if any(pattern.match(stripped) for pattern in CODE_STRONG_PATTERNS):
         return True
     if CODE_SYMBOL_PATTERN.search(stripped) and not CN_PUNCT_HINT_PATTERN.search(stripped):
         return True
     return False
+
+
+def split_leading_whitespace(line: str) -> tuple[str, str]:
+    leading_len = len(line) - len(line.lstrip(" \t"))
+    return line[:leading_len], line[leading_len:]
+
+
+def is_list_item_line(line: str) -> bool:
+    stripped = line.lstrip()
+    return bool(BULLET_LIST_PATTERN.match(stripped) or ORDERED_LIST_PATTERN.match(stripped))
 
 
 def detect_code_line_indexes(lines: list[str]) -> set[int]:
@@ -205,8 +218,8 @@ def _strip_markdown_inline(text: str) -> str:
     text = re.sub(r"_([^_]+)_", r"\1", text)
     text = re.sub(r"!\[[^\]]*\]\([^\)]*\)", "", text)
     text = re.sub(r"\[([^\]]+)\]\([^\)]*\)", r"\1", text)
-    text = re.sub(r"^\s*[-*+]\s+", "• ", text, flags=re.MULTILINE)
-    text = re.sub(r"^\s*(\d+)[.)]\s+", r"\1. ", text, flags=re.MULTILINE)
+    text = re.sub(r"^(\s*)[-*+]\s*", r"\1• ", text, flags=re.MULTILINE)
+    text = re.sub(r"^(\s*)(\d+)[.)](?:\s+|(?=\D))", r"\1\2. ", text, flags=re.MULTILINE)
     return text
 
 
@@ -467,9 +480,18 @@ def normalize_whitespace(text: str) -> str:
         if index in code_lines:
             normalized_lines.append(line.rstrip())
             continue
-        line = re.sub(r"[ \t]+", " ", line).strip()
-        line = re.sub(r" +([,.;:!?])", r"\1", line)
-        normalized_lines.append(line)
+        if not line.strip():
+            normalized_lines.append("")
+            continue
+
+        leading, core = split_leading_whitespace(line)
+        core = re.sub(r"[ \t]+", " ", core).strip()
+        core = re.sub(r" +([,.;:!?])", r"\1", core)
+
+        if is_list_item_line(core):
+            normalized_lines.append(f"{leading}{core}")
+        else:
+            normalized_lines.append(core)
     text = "\n".join(normalized_lines)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
@@ -485,26 +507,30 @@ def normalize_list_markers(text: str) -> str:
             normalized.append(raw.rstrip())
             continue
 
-        line = raw.strip()
-        if not line:
+        line = raw.rstrip()
+        if not line.strip():
             normalized.append("")
             continue
 
-        if re.match(r"^([-*_])(?:\s*\1){2,}$", line):
-            normalized.append(line)
+        leading, core = split_leading_whitespace(line)
+        core = core.strip()
+
+        if re.match(r"^([-*_])(?:\s*\1){2,}$", core):
+            normalized.append(core)
             continue
 
-        bullet = re.match(r"^(?:[-*+•·●▪◦‣⁃])\s*(.+)$", line)
+        bullet = BULLET_LIST_PATTERN.match(core)
         if bullet:
-            normalized.append(f"• {bullet.group(1).strip()}")
+            normalized.append(f"{leading}• {bullet.group(1).strip()}")
             continue
 
-        ordered = re.match(r"^[（(]?(\d{1,3})[)）.、]\s*(.+)$", line)
+        ordered = ORDERED_LIST_PATTERN.match(core)
         if ordered:
-            normalized.append(f"{ordered.group(1)}. {ordered.group(2).strip()}")
+            content = ordered.group(2) if ordered.group(2) is not None else ordered.group(3)
+            normalized.append(f"{leading}{ordered.group(1)}. {content.strip()}")
             continue
 
-        normalized.append(line)
+        normalized.append(core)
 
     return "\n".join(normalized)
 
@@ -519,21 +545,27 @@ def remove_repeated_noise(text: str) -> str:
             cleaned_lines.append(raw.rstrip())
             continue
 
-        line = raw.strip()
-        if not line:
+        line = raw.rstrip()
+        if not line.strip():
             cleaned_lines.append("")
             continue
 
-        if is_table_row_line(line) or is_table_separator_line(line):
-            cleaned_lines.append(line)
+        leading, core = split_leading_whitespace(line)
+        core = core.strip()
+
+        if is_table_row_line(core) or is_table_separator_line(core):
+            cleaned_lines.append(core)
             continue
 
-        line = re.sub(r"([:：])(?:\s*[^:：\n]{1,20}\1){2,}", r"\1", line)
-        line = re.sub(r"^((?:[^:：\n]{1,20})[:：])(?:\1){1,}", r"\1", line)
-        line = re.sub(r"([。.!?！？；;，,、])(?:\s*\1)+", r"\1", line)
-        line = re.sub(r"([\w\u4e00-\u9fff]{2,20})(?:\s*[，,;；]\s*\1){1,}", r"\1", line)
+        core = re.sub(r"([:：])(?:\s*[^:：\n]{1,20}\1){2,}", r"\1", core)
+        core = re.sub(r"^((?:[^:：\n]{1,20})[:：])(?:\1){1,}", r"\1", core)
+        core = re.sub(r"([。.!?！？；;，,、])(?:\s*\1)+", r"\1", core)
+        core = re.sub(r"([\w\u4e00-\u9fff]{2,20})(?:\s*[，,;；]\s*\1){1,}", r"\1", core)
 
-        cleaned_lines.append(line)
+        if is_list_item_line(core):
+            cleaned_lines.append(f"{leading}{core}")
+        else:
+            cleaned_lines.append(core)
 
     return "\n".join(cleaned_lines)
 
@@ -568,7 +600,8 @@ def merge_lines(text: str) -> str:
             merged.append(current.rstrip())
             continue
 
-        line = current.strip()
+        raw_line = current.rstrip()
+        line = raw_line.strip()
         if not line:
             if buffer:
                 merged.append(buffer.strip())
@@ -582,11 +615,13 @@ def merge_lines(text: str) -> str:
             merged.append(line)
             continue
 
-        if LIST_MARKER_PATTERN.match(line):
+        if is_list_item_line(line):
             if buffer:
                 merged.append(buffer.strip())
                 buffer = ""
-            merged.append(line)
+            leading, core = split_leading_whitespace(raw_line)
+            normalized_item = re.sub(r"[ \t]+", " ", core).strip()
+            merged.append(f"{leading}{normalized_item}")
             continue
 
         if not buffer:
@@ -610,7 +645,7 @@ def merge_lines(text: str) -> str:
 def should_break_paragraph(previous: str, current: str) -> bool:
     if is_table_row_line(previous) or is_table_row_line(current):
         return True
-    if re.match(r"^(?:\d+[.)、]\s+|•\s+|-\s+|[（(]\d+[)）])", current):
+    if is_list_item_line(current):
         return True
     if is_heading_like(previous) or is_heading_like(current):
         return True
@@ -621,7 +656,7 @@ def is_heading_like(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
-    if LIST_MARKER_PATTERN.match(stripped):
+    if is_list_item_line(stripped):
         return False
     if is_table_row_line(stripped):
         return False
@@ -652,23 +687,52 @@ def indent_paragraphs(text: str, treat_line_breaks_as_paragraphs: bool = False) 
     code_lines = detect_code_line_indexes(lines)
     formatted_lines = []
     paragraph_start = True
+    last_content_line = ""
+    list_block_indent = None
 
     for index, raw in enumerate(lines):
         if index in code_lines:
             formatted_lines.append(raw.rstrip())
             paragraph_start = True
+            list_block_indent = None
             continue
 
-        line = raw.strip()
-        if not line:
+        raw_line = raw.rstrip()
+        stripped = raw_line.strip()
+        if not stripped:
             formatted_lines.append("")
             paragraph_start = True
+            list_block_indent = None
             continue
+
+        if is_list_item_line(stripped):
+            leading, core = split_leading_whitespace(raw_line)
+            normalized = f"{leading}{core.strip()}"
+            if list_block_indent is None:
+                has_source_indent = bool(leading)
+                if has_source_indent:
+                    list_block_indent = ""
+                else:
+                    list_block_indent = PARAGRAPH_INDENT if should_indent_list_block(last_content_line) else ""
+
+            if list_block_indent and not leading:
+                line = f"{list_block_indent}{normalized}"
+            else:
+                line = normalized
+
+            formatted_lines.append(line)
+            last_content_line = stripped
+            paragraph_start = False
+            continue
+        else:
+            list_block_indent = None
+            line = stripped
 
         if treat_line_breaks_as_paragraphs:
             if should_indent(line):
                 line = f"{PARAGRAPH_INDENT}{line}"
             formatted_lines.append(line)
+            last_content_line = stripped
             paragraph_start = True
             continue
 
@@ -676,7 +740,8 @@ def indent_paragraphs(text: str, treat_line_breaks_as_paragraphs: bool = False) 
             line = f"{PARAGRAPH_INDENT}{line}"
 
         formatted_lines.append(line)
-        paragraph_start = False
+        last_content_line = stripped
+        paragraph_start = is_heading_like(stripped)
 
     return "\n".join(formatted_lines)
 
@@ -688,7 +753,19 @@ def should_indent(line: str) -> bool:
         return False
     if is_code_line_candidate(line) or line.startswith(("    ", "\t")):
         return False
-    return not bool(re.match(r"^(?:\d+[.)、]\s+|•\s+|-\s+|[（(]\d+[)）])", line))
+    return not is_list_item_line(line)
+
+
+def should_indent_list_block(previous_line: str) -> bool:
+    if not previous_line:
+        return False
+    if is_list_item_line(previous_line):
+        return False
+    if is_table_row_line(previous_line):
+        return False
+    if is_code_line_candidate(previous_line):
+        return False
+    return True
 
 
 def is_table_row_line(line: str) -> bool:
